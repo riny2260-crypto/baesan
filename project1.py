@@ -5,7 +5,7 @@ import re
 import pandas as pd
 from datetime import datetime
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
+from google_auth_oauthlib.flow import Flow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
@@ -38,31 +38,39 @@ def get_gdrive_service():
         else:
             if 'gdrive_secrets' in st.secrets:
                 client_config = {
-                    "installed": {
+                    "web": {
                         "client_id": st.secrets["gdrive_secrets"]["client_id"],
                         "client_secret": st.secrets["gdrive_secrets"]["client_secret"],
                         "project_id": st.secrets["gdrive_secrets"]["project_id"],
-                        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                        "token_uri": "https://oauth2.googleapis.com/token",
-                        "redirect_uris": ["urn:ietf:wg:oauth:2.0:oob", "http://localhost"]
+                        "auth_uri": st.secrets["gdrive_secrets"]["auth_uri"],
+                        "token_uri": st.secrets["gdrive_secrets"]["token_uri"]
                     }
                 }
-                flow = InstalledAppFlow.from_client_config(client_config, SCOPES)
-                auth_url, _ = flow.authorization_url(prompt='consent', access_type='offline')
-                st.markdown(f"[🔗 여기를 클릭하여 구글 계정 로그인을 완료해 주세요]({auth_url})")
-                code = st.text_input("인증 후 브라우저 주소창의 'code=' 뒤에 나오는 문자열을 입력해 주세요:")
-                if not code:
-                    st.info("구글 인증이 필요합니다. 위 링크에서 로그인 후 코드를 복사해 입력창에 넣어주세요.")
+                redirect_uri = st.secrets["gdrive_secrets"]["redirect_uri"]
+                flow = Flow.from_client_config(client_config, scopes=SCOPES, redirect_uri=redirect_uri)
+
+                query_params = st.query_params
+                if "code" in query_params:
+                    code = query_params["code"]
+                    flow.fetch_token(code=code)
+                    creds = flow.credentials
+                    with open('token.json', 'w') as token:
+                        token.write(creds.to_json())
+                    st.query_params.clear()
+                    st.rerun()
+                else:
+                    auth_url, _ = flow.authorization_url(prompt='consent', access_type='offline')
+                    st.markdown(f"[🔗 여기를 클릭하여 구글 계정 로그인을 완료해 주세요]({auth_url})")
+                    st.info("구글 인증이 필요합니다. 위 링크를 클릭해 로그인을 완료하시면 자동으로 돌아옵니다.")
                     st.stop()
-                flow.fetch_token(code=code)
-                creds = flow.credentials
             elif os.path.exists('client_secret.json'):
+                from google_auth_oauthlib.flow import InstalledAppFlow
                 flow = InstalledAppFlow.from_client_secrets_file('client_secret.json', SCOPES)
                 creds = flow.run_local_server(port=0)
+                with open('token.json', 'w') as token:
+                    token.write(creds.to_json())
             else:
                 raise FileNotFoundError("Authentication keys not found.")
-        with open('token.json', 'w') as token:
-            token.write(creds.to_json())
 
     return build('drive', 'v3', credentials=creds)
 
