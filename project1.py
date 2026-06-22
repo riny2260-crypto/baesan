@@ -47,19 +47,33 @@ def get_gdrive_service():
                     }
                 }
                 redirect_uri = st.secrets["gdrive_secrets"]["redirect_uri"]
-                flow = Flow.from_client_config(client_config, scopes=SCOPES, redirect_uri=redirect_uri)
+
+                if "flow_state" not in st.session_state:
+                    flow = Flow.from_client_config(client_config, scopes=SCOPES, redirect_uri=redirect_uri)
+                    auth_url, _ = flow.authorization_url(prompt='consent', access_type='offline')
+                    st.session_state.flow_state = {"auth_url": auth_url, "client_config": client_config,
+                                                   "redirect_uri": redirect_uri}
 
                 query_params = st.query_params
                 if "code" in query_params:
-                    code = query_params["code"]
-                    flow.fetch_token(code=code)
-                    creds = flow.credentials
-                    with open('token.json', 'w') as token:
-                        token.write(creds.to_json())
-                    st.query_params.clear()
-                    st.rerun()
+                    try:
+                        code = query_params["code"]
+                        saved_config = st.session_state.flow_state["client_config"]
+                        saved_redirect = st.session_state.flow_state["redirect_uri"]
+
+                        flow = Flow.from_client_config(saved_config, scopes=SCOPES, redirect_uri=saved_redirect)
+                        flow.fetch_token(code=code)
+                        creds = flow.credentials
+                        with open('token.json', 'w') as token:
+                            token.write(creds.to_json())
+                        st.query_params.clear()
+                        st.rerun()
+                    except Exception:
+                        st.session_state.pop("flow_state", None)
+                        st.query_params.clear()
+                        st.rerun()
                 else:
-                    auth_url, _ = flow.authorization_url(prompt='consent', access_type='offline')
+                    auth_url = st.session_state.flow_state["auth_url"]
                     st.markdown(f"[🔗 여기를 클릭하여 구글 계정 로그인을 완료해 주세요]({auth_url})")
                     st.info("구글 인증이 필요합니다. 위 링크를 클릭해 로그인을 완료하시면 자동으로 돌아옵니다.")
                     st.stop()
@@ -177,7 +191,7 @@ for course in list(TRAINING_KEYWORDS.keys()) + ["기타연수"]:
     if course not in st.session_state.course_submissions:
         st.session_state.course_submissions[course] = set()
 
-menu = st.sidebar.radio("메뉴 선택", ["이수증 업로드", "미제출자 확인"])
+menu = st.sidebar.radio("메뉴 Choice", ["이수증 업로드", "미제출자 확인"])
 
 if menu == "이수증 업로드":
     st.header("📥 이수증 업로드 및 정보 추출")
