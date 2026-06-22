@@ -1,23 +1,18 @@
 import streamlit as st
 import fitz  # PyMuPDF
 import io
-import os
 import re
 import pandas as pd
 from datetime import datetime
 import json
 
-# Google API 관련 모듈
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
-from streamlit.runtime.secrets import secrets
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
 
 
 # =========================================================================
-# 1. 학교 환경 맞춤 설정
+# 1. 학교 맞춤 설정
 # =========================================================================
 
 ALL_TEACHERS = ["김철수", "이영희", "박민수", "최수연", "정우성", "홍길동", "조서린"]
@@ -37,15 +32,13 @@ SCOPES = ['https://www.googleapis.com/auth/drive']
 
 
 # =========================================================================
-# 2. Google OAuth (Streamlit Secrets 기반)
+# 2. Streamlit Secrets 기반 Google OAuth
 # =========================================================================
 
 def get_gdrive_service():
-    """
-    Streamlit Secrets에 저장된 client_secret(JSON 전체)을 이용하여 OAuth 인증 수행
-    token.json 없이 동작
-    """
-    client_secret_json = secrets["google"]["client_secret"]
+    # Streamlit Cloud 또는 로컬 secrets.toml의 JSON 읽기
+    client_secret_json = st.secrets["google"]["client_secret"]
+
     client_config = json.loads(client_secret_json)
 
     flow = InstalledAppFlow.from_client_config(client_config, SCOPES)
@@ -55,7 +48,7 @@ def get_gdrive_service():
 
 
 # =========================================================================
-# 3. 구글 드라이브 폴더 생성/조회 함수
+# 3. 구글 드라이브 폴더 조회/생성
 # =========================================================================
 
 def get_or_create_drive_folder(service, folder_name, parent_id=None):
@@ -63,21 +56,18 @@ def get_or_create_drive_folder(service, folder_name, parent_id=None):
     if parent_id:
         query += f" and '{parent_id}' in parents"
 
-    results = service.files().list(q=query, fields="files(id)").execute()
-    items = results.get('files', [])
+    result = service.files().list(q=query, fields="files(id)").execute()
+    items = result.get("files", [])
 
     if items:
-        return items[0]['id']
-    else:
-        file_metadata = {
-            'name': folder_name,
-            'mimeType': 'application/vnd.google-apps.folder'
-        }
-        if parent_id:
-            file_metadata['parents'] = [parent_id]
+        return items[0]["id"]
 
-        folder = service.files().create(body=file_metadata, fields='id').execute()
-        return folder.get('id')
+    folder_meta = {"name": folder_name, "mimeType": "application/vnd.google-apps.folder"}
+    if parent_id:
+        folder_meta["parents"] = [parent_id]
+
+    folder = service.files().create(body=folder_meta, fields="id").execute()
+    return folder["id"]
 
 
 # =========================================================================
@@ -86,75 +76,71 @@ def get_or_create_drive_folder(service, folder_name, parent_id=None):
 
 def analyze_pdf_details(file_bytes):
     doc = fitz.open(stream=file_bytes, filetype="pdf")
-    full_text = "".join([page.get_text() for page in doc])
+    text = "".join(page.get_text() for page in doc)
 
-    detected_name = "미확인이름"
-    for name in ALL_TEACHERS:
-        if name in full_text:
-            detected_name = name
-            break
+    detected_name = next((n for n in ALL_TEACHERS if n in text), "미확인이름")
 
-    detected_courses = []
-    for course_name, keywords in TRAINING_KEYWORDS.items():
-        if any(keyword in full_text for keyword in keywords):
-            detected_courses.append(course_name)
+    detected_courses = [
+        name for name, keywords in TRAINING_KEYWORDS.items()
+        if any(k in text for k in keywords)
+    ]
     if not detected_courses:
-        detected_courses.append("기타연수")
+        detected_courses = ["기타연수"]
 
-    serial_match = re.search(r'(제\s*[\w\s-]+(?:호|호\b))', full_text)
-    detected_serial = serial_match.group(1).strip() if serial_match else "미확인(이수번호)"
+    serial_match = re.search(r'(제\s*[\w\s-]+호)', text)
+    serial = serial_match.group(1) if serial_match else "미확인(이수번호)"
 
-    date_pattern = r'(\d{4}[.\s년-]\s*\d{1,2}[.\s월-]\s*\d{1,2}[일]?\.?\s*(?:~|-)\s*\(?\d{4}[.\s년-]\s*\d{1,2}[.\s월-]\s*\d{1,2}[일]?\.?)'
-    date_match = re.search(date_pattern, full_text)
-    detected_period = date_match.group(1).strip() if date_match else "미확인(연수기간)"
+    date_pattern = r'(\d{4}[.\s년-]\s*\d{1,2}[.\s월-]\s*\d{1,2}[일]?\s*[~\-]\s*\d{4}[.\s년-]?\s*\d{1,2}[.\s월-]\s*\d{1,2}[일]?)'
+    date_match = re.search(date_pattern, text)
+    period = date_match.group(1) if date_match else "미확인(연수기간)"
 
-    time_match = re.search(r'(\d+\s*시간\s*\d*\s*분?|\d+\s*시간)', full_text)
-    detected_time = time_match.group(1).strip() if time_match else "미확인(이수시간)"
+    time_match = re.search(r'(\d+\s*시간\s*\d*\s*분?|\d+\s*시간)', text)
+    hours = time_match.group(1) if time_match else "미확인(이수시간)"
 
-    return detected_name, detected_courses, detected_serial, detected_period, detected_time
+    return detected_name, detected_courses, serial, period, hours
 
 
 # =========================================================================
-# 5. CSV 장부 업데이트 함수
+# 5. CSV 장부 업데이트
 # =========================================================================
 
-def update_csv_ledger(service, course_folder_id, course_name, data_row):
+def update_csv_ledger(service, course_folder_id, course_name, row):
     filename = f"{course_name}_취합장부.csv"
     query = f"name = '{filename}' and '{course_folder_id}' in parents and trashed = false"
-    results = service.files().list(q=query, fields="files(id)").execute()
-    items = results.get('files', [])
 
-    new_df = pd.DataFrame([data_row])
+    result = service.files().list(q=query, fields="files(id)").execute()
+    items = result.get("files", [])
+
+    new_df = pd.DataFrame([row])
 
     if items:
-        file_id = items[0]['id']
-        file_content = service.files().get_media(fileId=file_id).execute()
-        existing_df = pd.read_csv(io.BytesIO(file_content))
+        file_id = items[0]["id"]
+        content = service.files().get_media(fileId=file_id).execute()
 
-        if data_row["선생님 성함"] in existing_df["선생님 성함"].values:
-            existing_df = existing_df[existing_df["선생님 성함"] != data_row["선생님 성함"]]
+        existing_df = pd.read_csv(io.BytesIO(content))
+        existing_df = existing_df[existing_df["선생님 성함"] != row["선생님 성함"]]
 
-        combined_df = pd.concat([existing_df, new_df], ignore_index=True)
+        combined = pd.concat([existing_df, new_df], ignore_index=True)
 
-        csv_buffer = io.BytesIO()
-        combined_df.to_csv(csv_buffer, index=False, encoding='utf-8-sig')
-        csv_buffer.seek(0)
+        buf = io.BytesIO()
+        combined.to_csv(buf, index=False, encoding="utf-8-sig")
+        buf.seek(0)
 
-        media = MediaIoBaseUpload(csv_buffer, mimetype='text/csv', resumable=True)
+        media = MediaIoBaseUpload(buf, mimetype="text/csv", resumable=True)
         service.files().update(fileId=file_id, media_body=media).execute()
 
     else:
-        csv_buffer = io.BytesIO()
-        new_df.to_csv(csv_buffer, index=False, encoding='utf-8-sig')
-        csv_buffer.seek(0)
+        buf = io.BytesIO()
+        new_df.to_csv(buf, index=False, encoding="utf-8-sig")
+        buf.seek(0)
 
-        file_metadata = {'name': filename, 'parents': [course_folder_id]}
-        media = MediaIoBaseUpload(csv_buffer, mimetype='text/csv', resumable=True)
-        service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+        meta = {"name": filename, "parents": [course_folder_id]}
+        media = MediaIoBaseUpload(buf, mimetype="text/csv", resumable=True)
+        service.files().create(body=meta, media_body=media, fields="id").execute()
 
 
 # =========================================================================
-# 6. 웹 UI 구성
+# 6. Streamlit UI
 # =========================================================================
 
 st.set_page_config(page_title="연수 이수증 자동 분류기", layout="wide")
@@ -162,74 +148,72 @@ st.title("📄 연수 이수증 자동 분류 & 장부 자동 생성 프로그�
 st.markdown("---")
 
 if "course_submissions" not in st.session_state:
-    st.session_state.course_submissions = {course: set() for course in TRAINING_KEYWORDS.keys()}
+    st.session_state.course_submissions = {c: set() for c in TRAINING_KEYWORDS}
     st.session_state.course_submissions["기타연수"] = set()
 
 menu = st.sidebar.radio("메뉴 선택", ["이수증 업로드", "미제출자 확인"])
 
 
 # =========================================================================
-# 메뉴 1: 파일 업로드
+# 메뉴 1: 업로드
 # =========================================================================
 
 if menu == "이수증 업로드":
-    st.header("📥 이수증 업로드 및 정보 추출")
+    st.header("📥 이수증 업로드")
 
-    uploaded_files = st.file_uploader(
-        "PDF 파일을 선택하세요.",
-        type=["pdf"],
-        accept_multiple_files=True
-    )
+    uploaded_files = st.file_uploader("PDF 선택", type="pdf", accept_multiple_files=True)
 
-    if uploaded_files and st.button("분석 시작"):
+    if uploaded_files and st.button("업로드 시작"):
         try:
-            drive_service = get_gdrive_service()
-            root_folder_id = get_or_create_drive_folder(drive_service, "연수이수증_취합소")
-            success_count = 0
+            service = get_gdrive_service()
+            root_id = get_or_create_drive_folder(service, "연수이수증_취합소")
 
-            for uploaded_file in uploaded_files:
-                file_bytes = uploaded_file.read()
-                name, courses, serial, period, itime = analyze_pdf_details(file_bytes)
+            success = 0
+
+            for uf in uploaded_files:
+                bytes_data = uf.read()
+
+                name, courses, serial, period, hours = analyze_pdf_details(bytes_data)
 
                 if name == "미확인이름":
-                    st.warning(f"⚠️ '{uploaded_file.name}'에서 선생님 이름을 찾을 수 없습니다.")
+                    st.warning(f"⚠️ '{uf.name}' 에서 이름을 찾지 못했습니다.")
                     continue
 
                 record = {
                     "선생님 성함": name,
                     "이수번호": serial,
                     "연수 기간": period,
-                    "이수 시간": itime,
+                    "이수 시간": hours,
                     "비고": "통합 연수" if len(courses) >= 2 else "-",
                     "제출 일시": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 }
 
-                saved_folders = []
+                folders = []
                 for course in courses:
-                    folder_id = get_or_create_drive_folder(drive_service, course, root_folder_id)
+                    course_id = get_or_create_drive_folder(service, course, root_id)
 
-                    new_filename = f"({course})_{name}.pdf"
-                    metadata = {'name': new_filename, 'parents': [folder_id]}
-                    media = MediaIoBaseUpload(io.BytesIO(file_bytes), mimetype='application/pdf', resumable=True)
+                    new_name = f"({course})_{name}.pdf"
+                    meta = {"name": new_name, "parents": [course_id]}
+                    media = MediaIoBaseUpload(io.BytesIO(bytes_data), mimetype="application/pdf", resumable=True)
 
-                    drive_service.files().create(body=metadata, media_body=media, fields='id').execute()
+                    service.files().create(body=meta, media_body=media, fields="id").execute()
 
-                    update_csv_ledger(drive_service, folder_id, course, record)
+                    update_csv_ledger(service, course_id, course, record)
 
                     st.session_state.course_submissions[course].add(name)
-                    saved_folders.append(course)
+                    folders.append(course)
 
-                with st.expander(f"📌 {name} 선생님 처리 결과"):
-                    st.write(f"저장된 폴더: {', '.join(saved_folders)}")
+                with st.expander(f"📌 {name} 처리 내역"):
+                    st.write(f"저장 폴더: {', '.join(folders)}")
                     st.write(f"이수번호: {serial}")
-                    st.write(f"연수기간: {period}")
-                    st.write(f"이수시간: {itime}")
+                    st.write(f"기간: {period}")
+                    st.write(f"시간: {hours}")
 
-                success_count += 1
+                success += 1
 
-            if success_count > 0:
+            if success > 0:
                 st.balloons()
-                st.success(f"총 {success_count}건 업로드 완료!")
+                st.success(f"{success}건 업로드 완료!")
 
         except Exception as e:
             st.error(f"오류 발생: {e}")
@@ -239,12 +223,12 @@ if menu == "이수증 업로드":
 # 메뉴 2: 미제출자 확인
 # =========================================================================
 
-elif menu == "미제출자 확인":
+else:
     st.header("🔍 미제출자 확인")
 
     course = st.selectbox("연수 과정 선택", list(TRAINING_KEYWORDS.keys()) + ["기타연수"])
 
-    submitted = st.session_state.course_submissions.get(course, set())
+    submitted = st.session_state.course_submissions[course]
     unsubmitted = [t for t in ALL_TEACHERS if t not in submitted]
 
     col1, col2 = st.columns(2)
