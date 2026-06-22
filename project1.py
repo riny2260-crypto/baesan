@@ -27,66 +27,68 @@ TRAINING_KEYWORDS = {
 SCOPES = ['https://www.googleapis.com/auth/drive']
 
 
-def get_gdrive_service():
+def check_gdrive_auth():
     creds = None
     if os.path.exists('token.json'):
-        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+        try:
+            creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+        except Exception:
+            pass
 
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
+    if creds and creds.valid:
+        return build('drive', 'v3', credentials=creds)
+
+    if creds and creds.expired and creds.refresh_token:
+        try:
             creds.refresh(Request())
-        else:
-            if 'gdrive_secrets' in st.secrets:
-                client_config = {
-                    "web": {
-                        "client_id": st.secrets["gdrive_secrets"]["client_id"],
-                        "client_secret": st.secrets["gdrive_secrets"]["client_secret"],
-                        "project_id": st.secrets["gdrive_secrets"]["project_id"],
-                        "auth_uri": st.secrets["gdrive_secrets"]["auth_uri"],
-                        "token_uri": st.secrets["gdrive_secrets"]["token_uri"]
-                    }
-                }
-                redirect_uri = st.secrets["gdrive_secrets"]["redirect_uri"]
+            with open('token.json', 'w') as token:
+                token.write(creds.to_json())
+            return build('drive', 'v3', credentials=creds)
+        except Exception:
+            pass
 
-                if "flow_state" not in st.session_state:
-                    flow = Flow.from_client_config(client_config, scopes=SCOPES, redirect_uri=redirect_uri)
-                    auth_url, _ = flow.authorization_url(prompt='consent', access_type='offline')
-                    st.session_state.flow_state = {"auth_url": auth_url, "client_config": client_config,
-                                                   "redirect_uri": redirect_uri}
+    if 'gdrive_secrets' in st.secrets:
+        client_config = {
+            "web": {
+                "client_id": st.secrets["gdrive_secrets"]["client_id"],
+                "client_secret": st.secrets["gdrive_secrets"]["client_secret"],
+                "project_id": st.secrets["gdrive_secrets"]["project_id"],
+                "auth_uri": st.secrets["gdrive_secrets"]["auth_uri"],
+                "token_uri": st.secrets["gdrive_secrets"]["token_uri"]
+            }
+        }
+        redirect_uri = st.secrets["gdrive_secrets"]["redirect_uri"]
 
-                query_params = st.query_params
-                if "code" in query_params:
-                    try:
-                        code = query_params["code"]
-                        saved_config = st.session_state.flow_state["client_config"]
-                        saved_redirect = st.session_state.flow_state["redirect_uri"]
+        if "flow_state" not in st.session_state:
+            flow = Flow.from_client_config(client_config, scopes=SCOPES, redirect_uri=redirect_uri)
+            auth_url, _ = flow.authorization_url(prompt='consent', access_type='offline')
+            st.session_state.flow_state = {"auth_url": auth_url, "client_config": client_config,
+                                           "redirect_uri": redirect_uri}
 
-                        flow = Flow.from_client_config(saved_config, scopes=SCOPES, redirect_uri=saved_redirect)
-                        flow.fetch_token(code=code)
-                        creds = flow.credentials
-                        with open('token.json', 'w') as token:
-                            token.write(creds.to_json())
-                        st.query_params.clear()
-                        st.rerun()
-                    except Exception:
-                        st.session_state.pop("flow_state", None)
-                        st.query_params.clear()
-                        st.rerun()
-                else:
-                    auth_url = st.session_state.flow_state["auth_url"]
-                    st.markdown(f"[🔗 여기를 클릭하여 구글 계정 로그인을 완료해 주세요]({auth_url})")
-                    st.info("구글 인증이 필요합니다. 위 링크를 클릭해 로그인을 완료하시면 자동으로 돌아옵니다.")
-                    st.stop()
-            elif os.path.exists('client_secret.json'):
-                from google_auth_oauthlib.flow import InstalledAppFlow
-                flow = InstalledAppFlow.from_client_secrets_file('client_secret.json', SCOPES)
-                creds = flow.run_local_server(port=0)
+        query_params = st.query_params
+        if "code" in query_params:
+            try:
+                code = query_params["code"]
+                saved_config = st.session_state.flow_state["client_config"]
+                saved_redirect = st.session_state.flow_state["redirect_uri"]
+
+                flow = Flow.from_client_config(saved_config, scopes=SCOPES, redirect_uri=saved_redirect)
+                flow.fetch_token(code=code)
+                creds = flow.credentials
                 with open('token.json', 'w') as token:
                     token.write(creds.to_json())
-            else:
-                raise FileNotFoundError("Authentication keys not found.")
-
-    return build('drive', 'v3', credentials=creds)
+                st.query_params.clear()
+                st.session_state.pop("flow_state", None)
+                st.rerun()
+            except Exception:
+                st.session_state.pop("flow_state", None)
+                st.query_params.clear()
+                st.rerun()
+        else:
+            auth_url = st.session_state.flow_state["auth_url"]
+            st.sidebar.markdown(f"[🔗 여기를 클릭하여 구글 계정 로그인을 먼저 완료해 주세요]({auth_url})")
+            return None
+    return None
 
 
 def get_or_create_drive_folder(service, folder_name, parent_id=None):
@@ -191,73 +193,80 @@ for course in list(TRAINING_KEYWORDS.keys()) + ["기타연수"]:
     if course not in st.session_state.course_submissions:
         st.session_state.course_submissions[course] = set()
 
-menu = st.sidebar.radio("메뉴 Choice", ["이수증 업로드", "미제출자 확인"])
+drive_service = check_gdrive_auth()
+
+menu = st.sidebar.radio("메뉴 선택", ["이수증 업로드", "미제출자 확인"])
 
 if menu == "이수증 업로드":
     st.header("📥 이수증 업로드 및 정보 추출")
-    st.write("선생님들의 이수증(PDF) 파일을 업로드하면 파일 분류와 장부 작성이 동시에 진행됩니다.")
 
-    uploaded_files = st.file_uploader(
-        "PDF 파일을 선택하거나 이 창으로 드래그해 주세요. (다중 선택 가능)",
-        type=["pdf"],
-        accept_multiple_files=True
-    )
+    if drive_service is None:
+        st.warning("⚠️ 구글 드라이브 연결이 필요합니다. 왼쪽 사이드바의 링크를 클릭해 먼저 로그인을 완료해 주세요!")
+    else:
+        st.success("✅ 구글 클라우드가 안전하게 연결되었습니다. 이제 이수증 파일을 마음껏 업로드하셔도 됩니다!")
 
-    if uploaded_files:
-        if st.button("파일 분석 및 구글 드라이브 전송 시작"):
-            try:
-                drive_service = get_gdrive_service()
-                root_folder_id = get_or_create_drive_folder(drive_service, "연수이수증_취합소")
-                success_count = 0
+        uploaded_files = st.file_uploader(
+            "PDF 파일을 선택하거나 이 창으로 드래그해 주세요. (다중 선택 가능)",
+            type=["pdf"],
+            accept_multiple_files=True
+        )
 
-                for uploaded_file in uploaded_files:
-                    file_bytes = uploaded_file.read()
-                    name, courses, serial, period, itime = analyze_pdf_details(file_bytes)
+        if uploaded_files:
+            if st.button("파일 분석 및 구글 드라이브 전송 시작"):
+                try:
+                    root_folder_id = get_or_create_drive_folder(drive_service, "연수이수증_취합소")
+                    success_count = 0
 
-                    if name == "미확인이름":
-                        st.warning(f"⚠️ '{uploaded_file.name}' 파일에서 등록된 선생님 이름을 찾을 수 없어 건너뜁니다.")
-                        continue
+                    for uploaded_file in uploaded_files:
+                        file_bytes = uploaded_file.read()
+                        name, courses, serial, period, itime = analyze_pdf_details(file_bytes)
 
-                    is_integrated = "통합 연수" if len(courses) >= 2 else "-"
-                    info_data = {
-                        "선생님 성함": name,
-                        "이수번호": serial,
-                        "연수 기간": period,
-                        "이수 시간": itime,
-                        "비고": is_integrated,
-                        "제출 일시": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    }
+                        if name == "미확인이름":
+                            st.warning(f"⚠️ '{uploaded_file.name}' 파일에서 등록된 선생님 이름을 찾을 수 없어 건너뜁니다.")
+                            continue
 
-                    saved_folders = []
-                    for course in courses:
-                        course_folder_id = get_or_create_drive_folder(drive_service, course, parent_id=root_folder_id)
-                        new_filename = f"({course})_{name}.pdf"
-                        file_metadata = {
-                            'name': new_filename,
-                            'parents': [course_folder_id]
+                        is_integrated = "통합 연수" if len(courses) >= 2 else "-"
+                        info_data = {
+                            "선생님 성함": name,
+                            "이수번호": serial,
+                            "연수 기간": period,
+                            "이수 시간": itime,
+                            "비고": is_integrated,
+                            "제출 일시": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         }
-                        media = MediaIoBaseUpload(io.BytesIO(file_bytes), mimetype='application/pdf', resumable=True)
-                        drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
-                        update_csv_ledger(drive_service, course_folder_id, course, info_data)
-                        saved_folders.append(course)
 
-                        if course in st.session_state.course_submissions:
-                            st.session_state.course_submissions[course].add(name)
-                        else:
-                            st.session_state.course_submissions["기타연수"].add(name)
+                        saved_folders = []
+                        for course in courses:
+                            course_folder_id = get_or_create_drive_folder(drive_service, course,
+                                                                          parent_id=root_folder_id)
+                            new_filename = f"({course})_{name}.pdf"
+                            file_metadata = {
+                                'name': new_filename,
+                                'parents': [course_folder_id]
+                            }
+                            media = MediaIoBaseUpload(io.BytesIO(file_bytes), mimetype='application/pdf',
+                                                      resumable=True)
+                            drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+                            update_csv_ledger(drive_service, course_folder_id, course, info_data)
+                            saved_folders.append(course)
 
-                    with st.expander(f"✅ {name} 선생님 클라우드 전송 완료 (추출 정보 확인)"):
-                        st.write(f"• 드라이브 저장 폴더: {', '.join(saved_folders)}")
-                        st.text(f"• 이수번호: {serial}\n• 연수기간: {period}\n• 이수시간: {itime}\n• 과정구분: {is_integrated}")
+                            if course in st.session_state.course_submissions:
+                                st.session_state.course_submissions[course].add(name)
+                            else:
+                                st.session_state.course_submissions["기타연수"].add(name)
 
-                    success_count += 1
+                        with st.expander(f"✅ {name} 선생님 클라우드 전송 완료 (추출 정보 확인)"):
+                            st.write(f"• 드라이브 저장 폴더: {', '.join(saved_folders)}")
+                            st.text(f"• 이수번호: {serial}\n• 연수기간: {period}\n• 이수시간: {itime}\n• 과정구분: {is_integrated}")
 
-                if success_count > 0:
-                    st.balloons()
-                    st.success(f"🎉 총 {success_count}명의 이수증이 구글 드라이브 클라우드로 안전하게 업로드 및 분류 장부 반영 완료되었습니다!")
+                        success_count += 1
 
-            except Exception as e:
-                st.error(f"⚠️ 구글 API 연결 중 오류 발생: {e}")
+                    if success_count > 0:
+                        st.balloons()
+                        st.success(f"🎉 총 {success_count}명의 이수증이 구글 드라이브 클라우드로 안전하게 업로드 및 분류 장부 반영 완료되었습니다!")
+
+                except Exception as e:
+                    st.error(f"⚠️ 구글 API 연결 중 오류 발생: {e}")
 
 elif menu == "미제출자 확인":
     st.header("🔍 연수 과정별 미제출자 현황")
