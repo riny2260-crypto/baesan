@@ -57,21 +57,3 @@ def check_gdrive_auth():
                 "token_uri": st.secrets["gdrive_secrets"]["token_uri"]
             }
         }
-        redirect_uri = st.secrets["gdrive_secrets"]["redirect_uri"]
-
-        flow = Flow.from_client_config(client_config, scopes=SCOPES, redirect_uri=redirect_uri)
-        auth_url, _ = flow.authorization_url(prompt='consent', access_type='offline')
-
-        st.sidebar.markdown(f"[🔗 1단계: 여기를 클릭하여 구글 로그인 진행]({auth_url})")
-
-        code_input = st.sidebar.text_input("🔑 2단계: 로그인 완료 후 주소창의 code= 뒤에 나오는 문구를 입력해 주세요:")
-        if code_input:
-            try:
-                flow.fetch_token(code=code_input)
-                creds = flow.credentials
-                with open('token.json', 'w') as token:
-                    token.write(creds.to_json())
-                st.sidebar.success("🎉 인증 열쇠 생성 성공! 새로고침합니다.")
-                st.rerun()
-            except Exception as e:
-                st.sidebar.error(f"인증 실패:
