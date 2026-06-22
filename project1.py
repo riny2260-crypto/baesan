@@ -59,35 +59,23 @@ def check_gdrive_auth():
         }
         redirect_uri = st.secrets["gdrive_secrets"]["redirect_uri"]
 
-        if "flow_state" not in st.session_state:
-            flow = Flow.from_client_config(client_config, scopes=SCOPES, redirect_uri=redirect_uri)
-            auth_url, _ = flow.authorization_url(prompt='consent', access_type='offline')
-            st.session_state.flow_state = {"auth_url": auth_url, "client_config": client_config,
-                                           "redirect_uri": redirect_uri}
+        flow = Flow.from_client_config(client_config, scopes=SCOPES, redirect_uri=redirect_uri)
+        auth_url, _ = flow.authorization_url(prompt='consent', access_type='offline')
 
-        query_params = st.query_params
-        if "code" in query_params:
+        st.sidebar.markdown(f"[🔗 1단계: 여기를 클릭하여 구글 로그인 진행]({auth_url})")
+
+        code_input = st.sidebar.text_input("🔑 2단계: 로그인 완료 후 주소창의 code= 뒤에 나오는 문구를 입력해 주세요:")
+        if code_input:
             try:
-                code = query_params["code"]
-                saved_config = st.session_state.flow_state["client_config"]
-                saved_redirect = st.session_state.flow_state["redirect_uri"]
-
-                flow = Flow.from_client_config(saved_config, scopes=SCOPES, redirect_uri=saved_redirect)
-                flow.fetch_token(code=code)
+                flow.fetch_token(code=code_input)
                 creds = flow.credentials
                 with open('token.json', 'w') as token:
                     token.write(creds.to_json())
-                st.query_params.clear()
-                st.session_state.pop("flow_state", None)
+                st.sidebar.success("🎉 인증 열쇠 생성 성공! 새로고침합니다.")
                 st.rerun()
-            except Exception:
-                st.session_state.pop("flow_state", None)
-                st.query_params.clear()
-                st.rerun()
-        else:
-            auth_url = st.session_state.flow_state["auth_url"]
-            st.sidebar.markdown(f"[🔗 여기를 클릭하여 구글 계정 로그인을 먼저 완료해 주세요]({auth_url})")
-            return None
+            except Exception as e:
+                st.sidebar.error(f"인증 실패: {e}")
+
     return None
 
 
@@ -201,9 +189,9 @@ if menu == "이수증 업로드":
     st.header("📥 이수증 업로드 및 정보 추출")
 
     if drive_service is None:
-        st.warning("⚠️ 구글 드라이브 연결이 필요합니다. 왼쪽 사이드바의 링크를 클릭해 먼저 로그인을 완료해 주세요!")
+        st.warning("⚠️ 구글 드라이브 인증이 대기 중입니다. 왼쪽 사이드바의 안내 단계를 따라 수동 인증을 마쳐주세요!")
     else:
-        st.success("✅ 구글 클라우드가 안전하게 연결되었습니다. 이제 이수증 파일을 마음껏 업로드하셔도 됩니다!")
+        st.success("✅ 구글 클라우드가 완벽하게 연결되었습니다. 이제 이수증 파일을 업로드하셔도 됩니다!")
 
         uploaded_files = st.file_uploader(
             "PDF 파일을 선택하거나 이 창으로 드래그해 주세요. (다중 선택 가능)",
@@ -239,7 +227,7 @@ if menu == "이수증 업로드":
                         for course in courses:
                             course_folder_id = get_or_create_drive_folder(drive_service, course,
                                                                           parent_id=root_folder_id)
-                            new_filename = f"({course})_{name}.pdf"
+                            new_filename = f"({course})_{\n                        name}.pdf"
                             file_metadata = {
                                 'name': new_filename,
                                 'parents': [course_folder_id]
